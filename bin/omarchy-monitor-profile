@@ -73,7 +73,17 @@ list_json() {
   if (( ${#profiles[@]} )); then
     jq -cs --arg active "$active" '{
       active: $active,
-      profiles: (map({name, monitors: [.monitors[].name]}) | sort_by(.name))
+      profiles: (map({
+        name,
+        primary,
+        monitors: [.monitors[].name],
+        details: ([.monitors[] |
+          "\(.name) \(.width)x\(.height)" +
+          (if .refreshRate > 0 then " @\(.refreshRate | round)Hz" else "" end) +
+          (if (.scale | tonumber) != 1 then " · scale \(.scale)" else "" end) +
+          (if .mirror != "" then " (mirrors \(.mirror))" else "" end)
+        ] | join("  +  "))
+      }) | sort_by(.name))
     }' "${profiles[@]}"
   else
     jq -cn --arg active "$active" '{active: $active, profiles: []}'
@@ -104,9 +114,10 @@ save_profile() {
       monitors: [
         $monitors[]
         | select(.name != "FALLBACK" and .disabled != true and .width > 0 and .height > 0)
+        | . as $monitor
         | {
             name,
-            mode: (.currentFormat // ("\(.width)x\(.height)@\(.refreshRate)")),
+            mode: "\(.width)x\(.height)@\(.refreshRate)",
             x,
             y,
             width,
@@ -114,7 +125,16 @@ save_profile() {
             refreshRate,
             scale,
             transform: (.transform // 0),
-            mirror: (if .mirrorOf == "none" then "" else (.mirrorOf // "") end)
+            mirror: (
+              if ($monitor.mirrorOf == null or $monitor.mirrorOf == "none" or $monitor.mirrorOf == "") then
+                ""
+              else
+                ([$monitors[]
+                  | select((.id // "" | tostring) == ($monitor.mirrorOf | tostring))
+                  | .name][0] //
+                  (if ($monitor.mirrorOf | type) == "string" then $monitor.mirrorOf else "" end))
+              end
+            )
           }
       ] | sort_by(.x, .y, .name)
     }
@@ -122,8 +142,6 @@ save_profile() {
 
   mv "$temporary" "$file"
   trap - RETURN
-  mkdir -p "$STATE_DIR"
-  printf '%s\n' "$name" >"$ACTIVE_FILE"
   notify "Saved monitor profile: $name"
 }
 
@@ -166,12 +184,8 @@ configure_monitor() {
   output_lua=$(lua_quote "$name")
   mode_lua=$(lua_quote "$mode")
   position_lua=$(lua_quote "$position")
-  config="hl.monitor({ output = $output_lua, mode = $mode_lua, position = $position_lua, scale = $scale, transform = $transform"
-  if [[ -n $mirror ]]; then
-    mirror_lua=$(lua_quote "$mirror")
-    config+=", mirror = $mirror_lua"
-  fi
-  config+=" })"
+  mirror_lua=$(lua_quote "$mirror")
+  config="hl.monitor({ output = $output_lua, mode = $mode_lua, position = $position_lua, scale = $scale, transform = $transform, disabled = false, mirror = $mirror_lua })"
 
   hyprctl eval "$config" >/dev/null 2>&1
 }
@@ -231,12 +245,23 @@ restore_layout_json() {
   # failed profile switch, preserving at least one usable scanout throughout.
   while IFS= read -r row; do
     monitor=$(jq -r '.name' <<<"$row")
-    mode=$(jq -r '.currentFormat // ("\(.width)x\(.height)@\(.refreshRate)")' <<<"$row")
+    mode=$(jq -r 'if (.width > 0 and .height > 0 and .refreshRate > 0)
+      then "\(.width)x\(.height)@\(.refreshRate)"
+      else "preferred"
+      end' <<<"$row")
     x=$(jq -r '.x' <<<"$row")
     y=$(jq -r '.y' <<<"$row")
     scale=$(jq -r '.scale' <<<"$row")
     transform=$(jq -r '.transform // 0' <<<"$row")
-    mirror=$(jq -r 'if .mirrorOf == "none" then "" else (.mirrorOf // "") end' <<<"$row")
+    mirror=$(jq -r --argjson layout "$layout" '
+      if (.mirrorOf == null or .mirrorOf == "none" or .mirrorOf == "") then
+        ""
+      else
+        ([$layout[]
+          | select((.id // "" | tostring) == (.mirrorOf | tostring))
+          | .name][0] // (if (.mirrorOf | type) == "string" then .mirrorOf else "" end))
+      end
+    ' <<<"$row")
     configure_monitor "$monitor" "$mode" "${x}x${y}" "$scale" "$transform" "$mirror" || true
     wake_monitor "$monitor"
     wait_for_monitor "$monitor" || true
@@ -268,6 +293,14 @@ profile_matches() {
 
   jq -e --argjson current "$current" '
     def close($a; $b): (($a - $b) | fabs) < 0.01;
+    def mirror_name($actual):
+      if ($actual.mirrorOf == null or $actual.mirrorOf == "none" or $actual.mirrorOf == "") then
+        ""
+      else
+        ([$current[]
+          | select((.id // "" | tostring) == ($actual.mirrorOf | tostring))
+          | .name][0] // ($actual.mirrorOf | tostring))
+      end;
     .monitors as $wanted
     | all($wanted[]; . as $monitor |
         any($current[];
@@ -279,7 +312,7 @@ profile_matches() {
             and close(.refreshRate; $monitor.refreshRate)
             and close(.scale; $monitor.scale)
             and (.transform // 0) == $monitor.transform
-            and ((.mirrorOf // "none") == (if $monitor.mirror == "" then "none" else $monitor.mirror end))))
+            and mirror_name(.) == $monitor.mirror))
       and all($current[]; . as $actual |
         if ($actual.disabled != true and $actual.width > 0 and $actual.height > 0 and $actual.name != "FALLBACK")
         then any($wanted[]; .name == $actual.name)
@@ -289,7 +322,7 @@ profile_matches() {
 }
 
 recover_usable_output() {
-  local file="$1" current row monitor mode scale transform
+  local file="$1" quiet="${2:-false}" current row monitor mode scale transform mirror
 
   any_monitor_ready && return 0
   current=$(hyprctl monitors all -j 2>/dev/null) || return 1
@@ -303,10 +336,11 @@ recover_usable_output() {
     mode=$(jq -r '.mode' <<<"$row")
     scale=$(jq -r '.scale' <<<"$row")
     transform=$(jq -r '.transform' <<<"$row")
-    configure_monitor "$monitor" "$mode" "0x0" "$scale" "$transform" || true
+    mirror=$(jq -r '.mirror' <<<"$row")
+    configure_monitor "$monitor" "$mode" "0x0" "$scale" "$transform" "$mirror" || true
     wake_monitor "$monitor"
     if wait_for_monitor "$monitor"; then
-      notify "Display recovered: $monitor"
+      [[ $quiet == "true" ]] || notify "Display recovered: $monitor"
       return 0
     fi
   done < <(jq -c '.monitors[]' "$file")
@@ -315,13 +349,16 @@ recover_usable_output() {
   # This covers single-external profiles whose dock or receiver disappears.
   while IFS= read -r row; do
     monitor=$(jq -r '.name' <<<"$row")
-    mode=$(jq -r '.currentFormat // "preferred"' <<<"$row")
+    mode=$(jq -r 'if (.width > 0 and .height > 0 and .refreshRate > 0)
+      then "\(.width)x\(.height)@\(.refreshRate)"
+      else "preferred"
+      end' <<<"$row")
     scale=$(jq -r 'if (.scale | type) == "number" and .scale > 0 then .scale else 1 end' <<<"$row")
     transform=$(jq -r '.transform // 0' <<<"$row")
-    configure_monitor "$monitor" "$mode" "0x0" "$scale" "$transform" || true
+    configure_monitor "$monitor" "$mode" "0x0" "$scale" "$transform" "" || true
     wake_monitor "$monitor"
     if wait_for_monitor "$monitor"; then
-      notify "Display recovered: $monitor"
+      [[ $quiet == "true" ]] || notify "Display recovered: $monitor"
       return 0
     fi
   done < <(jq -c '.[] | select(.name != "FALLBACK")' <<<"$current")
@@ -341,6 +378,12 @@ apply_profile_locked() {
   if profile_matches "$file"; then
     mkdir -p "$STATE_DIR"
     printf '%s\n' "$name" >"$ACTIVE_FILE"
+    if [[ $quiet != "true" ]]; then
+      primary=$(jq -r '.primary' "$file")
+      primary_lua=$(lua_quote "$primary")
+      hyprctl dispatch "hl.dsp.focus({ monitor = $primary_lua })" >/dev/null 2>&1 || true
+      notify "Monitor profile: $name"
+    fi
     return 0
   fi
 
@@ -351,7 +394,7 @@ apply_profile_locked() {
 
   while IFS= read -r monitor; do
     jq -e --arg name "$monitor" 'any(.[]; .name == $name)' <<<"$current" >/dev/null || {
-      notify "Monitor profile unavailable: $monitor is disconnected"
+      [[ $quiet == "true" ]] || notify "Monitor profile unavailable: $monitor is disconnected"
       die "Cannot apply $name: $monitor is disconnected"
     }
   done < <(jq -r '.monitors[].name' "$file")
@@ -377,12 +420,12 @@ apply_profile_locked() {
     mode=$(jq -r '.mode' <<<"$row")
     scale=$(jq -r '.scale' <<<"$row")
     transform=$(jq -r '.transform' <<<"$row")
-    configure_monitor "$monitor" "$mode" "${stage_x}x0" "$scale" "$transform" || true
+    configure_monitor "$monitor" "$mode" "${stage_x}x0" "$scale" "$transform" "" || true
     wake_monitor "$monitor"
     if ! wait_for_monitor "$monitor"; then
       failed_monitor="$monitor"
       restore_layout_json "$current" "$current_workspaces"
-      notify "Monitor profile failed: $failed_monitor did not activate"
+      [[ $quiet == "true" ]] || notify "Monitor profile failed: $failed_monitor did not activate"
       die "Cannot apply $name: $failed_monitor did not activate"
     fi
     stage_width=$(jq -r '(.width / .scale) | ceil' <<<"$row")
@@ -417,7 +460,7 @@ apply_profile_locked() {
   done
   if ! profile_matches "$file"; then
     restore_layout_json "$current" "$current_workspaces"
-    notify "Monitor profile failed: restored the previous layout"
+    [[ $quiet == "true" ]] || notify "Monitor profile failed: restored the previous layout"
     die "The $name monitor profile did not settle into its saved layout"
   fi
 
@@ -435,6 +478,21 @@ apply_profile() {
   (
     flock -w 5 9 || die "Another monitor profile change is still running"
     apply_profile_locked "$name" "$quiet"
+  ) 9>"$LOCK_FILE"
+}
+
+restore_profile() {
+  (
+    flock -w 5 9 || die "Another monitor profile change is still running"
+
+    local name
+    name=$(active_profile)
+    [[ -n $name ]] || exit 0
+
+    if ! (apply_profile_locked "$name" true) 2>/dev/null; then
+      recover_usable_output "$(profile_file "$name")" true ||
+        die "Could not restore a usable monitor for profile: $name"
+    fi
   ) 9>"$LOCK_FILE"
 }
 
@@ -480,11 +538,7 @@ case "$command" in
     rm -f "$ACTIVE_FILE"
     ;;
   restore)
-    name=$(active_profile)
-    [[ -n $name ]] || exit 0
-    if ! apply_profile "$name" true 2>/dev/null; then
-      recover_usable_output "$(profile_file "$name")" || die "Could not restore a usable monitor for profile: $name"
-    fi
+    restore_profile
     ;;
   --help|-h|help|"")
     usage

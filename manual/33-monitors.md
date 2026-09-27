@@ -50,7 +50,7 @@ If you regularly switch between several arrangements, save each working layout a
 omarchy monitor profile save desk
 ```
 
-Create as many profiles as you need, such as `desk`, `presentation`, or `external-only`. Saved profiles appear in the Display panel and can also be managed from the command line:
+Create as many profiles as you need, such as `desk`, `presentation`, or `external-only`. The Display panel's **Save current layout** action can create them directly; each saved profile shows its primary display and layout details. Hovering or selecting a saved profile in the panel reveals its edit actions: **Overwrite with current layout** re-saves the profile from the layout on screen, and **Delete profile** removes it after a confirming second click. Profiles can also be managed from the command line:
 
 ```bash
 omarchy monitor profile list
@@ -58,7 +58,7 @@ omarchy monitor profile apply presentation
 omarchy monitor profile remove presentation
 ```
 
-Applying a profile remembers it across monitor reconnects and graphical logins. Omarchy activates and verifies every destination display before disabling an existing one, so a disconnected display cannot leave you without a usable screen. Toggling an individual display in the Display panel deactivates the selected profile; you can do the same without changing the current layout with `omarchy monitor profile deactivate`.
+Saving stores the current layout without changing which profile is active; apply the profile when you want it to become the arrangement restored on reconnects and graphical logins. Omarchy activates and verifies every destination display before disabling an existing one, so a disconnected display cannot leave you without a usable screen. While a profile is active, it owns the complete layout, including whether the laptop panel participates when the lid is closed. Toggling an individual display in the Display panel deactivates the selected profile; you can do the same without changing the current layout with `omarchy monitor profile deactivate`.
 
 ### Controlling brightness
 

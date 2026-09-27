@@ -47,13 +47,33 @@ elif [[ ${1:-} == "eval" ]]; then
     width="${mode%%x*}"
     remainder="${mode#*x}"
     height="${remainder%%@*}"
+    if [[ $mode == preferred ]]; then
+      width=1920
+      height=1080
+    fi
     x="${position%x*}"
     y="${position##*x}"
-    jq --arg name "$name" --arg mode "$mode" --argjson width "$width" --argjson height "$height" \
-      --argjson x "$x" --argjson y "$y" --argjson scale "$scale" --argjson transform "$transform" '
+    disabled="$(sed -n 's/.*disabled = \([^,}]*\).*/\1/p' <<<"$lua" | tr -d ' ' )"
+    mirror="$(sed -n 's/.*mirror = "\([^"]*\)".*/\1/p' <<<"$lua")"
+    monitor_state=$(<"$OMARCHY_TEST_MONITORS_FILE")
+    jq --arg name "$name" --arg mode "$mode" --arg mirror "$mirror" --argjson monitors "$monitor_state" \
+      --argjson width "$width" --argjson height "$height" \
+      --argjson x "$x" --argjson y "$y" --argjson scale "$scale" --argjson transform "$transform" \
+      --argjson enabled "$([[ $disabled == false ]] && echo true || echo false)" '
         map(if .name == $name then . + {
-          disabled:false, dpmsStatus:true, width:$width, height:$height,
-          x:$x, y:$y, scale:$scale, transform:$transform, currentFormat:$mode, focused:false
+          disabled: (if $enabled then false else .disabled end),
+          dpmsStatus: (if $enabled then true else .dpmsStatus end),
+          width: (if $enabled then $width else .width end),
+          height: (if $enabled then $height else .height end),
+          x: (if $enabled then $x else .x end),
+          y: (if $enabled then $y else .y end),
+          scale: (if $enabled then $scale else .scale end),
+          transform: (if $enabled then $transform else .transform end),
+          currentFormat: (if $enabled then "XRGB8888" else .currentFormat end),
+          mirrorOf: (if $enabled and $mirror != "" then
+            ([$monitors[] | select(.name == $mirror) | .id][0] // "none")
+          else .mirrorOf end),
+          focused:false
         } else . end)
       ' "$OMARCHY_TEST_MONITORS_FILE" >"$OMARCHY_TEST_MONITORS_FILE.tmp"
   fi
@@ -92,8 +112,8 @@ run_profile() {
 write_dual_state() {
   cat >"$monitors_file" <<'JSON'
 [
-  {"name":"DP-1","description":"Internal","disabled":false,"dpmsStatus":true,"focused":false,"width":1920,"height":1080,"refreshRate":60,"currentFormat":"1920x1080@60.00Hz","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":"none"},
-  {"name":"DP-2","description":"External","disabled":false,"dpmsStatus":true,"focused":true,"width":2560,"height":1440,"refreshRate":144,"currentFormat":"2560x1440@144.00Hz","x":1920,"y":0,"scale":1,"transform":0,"mirrorOf":"none"}
+  {"id":0,"name":"DP-1","description":"Internal","disabled":false,"dpmsStatus":true,"focused":false,"width":1920,"height":1080,"refreshRate":60,"currentFormat":"XRGB8888","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":"none"},
+  {"id":1,"name":"DP-2","description":"External","disabled":false,"dpmsStatus":true,"focused":true,"width":2560,"height":1440,"refreshRate":144,"currentFormat":"XRGB8888","x":1920,"y":0,"scale":1,"transform":0,"mirrorOf":"none"}
 ]
 JSON
 }
@@ -101,8 +121,8 @@ JSON
 write_external_state() {
   cat >"$monitors_file" <<'JSON'
 [
-  {"name":"DP-1","description":"Internal","disabled":true,"dpmsStatus":false,"focused":false,"width":1920,"height":1080,"refreshRate":60,"currentFormat":"1920x1080@60.00Hz","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":"none"},
-  {"name":"DP-2","description":"External","disabled":false,"dpmsStatus":true,"focused":true,"width":2560,"height":1440,"refreshRate":144,"currentFormat":"2560x1440@144.00Hz","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":"none"}
+  {"id":0,"name":"DP-1","description":"Internal","disabled":true,"dpmsStatus":false,"focused":false,"width":1920,"height":1080,"refreshRate":60,"currentFormat":"XRGB8888","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":"none"},
+  {"id":1,"name":"DP-2","description":"External","disabled":false,"dpmsStatus":true,"focused":true,"width":2560,"height":1440,"refreshRate":144,"currentFormat":"XRGB8888","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":"none"}
 ]
 JSON
 }
@@ -110,8 +130,17 @@ JSON
 write_internal_state() {
   cat >"$monitors_file" <<'JSON'
 [
-  {"name":"DP-1","description":"Internal","disabled":false,"dpmsStatus":true,"focused":true,"width":1920,"height":1080,"refreshRate":60,"currentFormat":"1920x1080@60.00Hz","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":"none"},
-  {"name":"DP-2","description":"External","disabled":true,"dpmsStatus":false,"focused":false,"width":2560,"height":1440,"refreshRate":144,"currentFormat":"2560x1440@144.00Hz","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":"none"}
+  {"id":0,"name":"DP-1","description":"Internal","disabled":false,"dpmsStatus":true,"focused":true,"width":1920,"height":1080,"refreshRate":60,"currentFormat":"XRGB8888","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":"none"},
+  {"id":1,"name":"DP-2","description":"External","disabled":true,"dpmsStatus":false,"focused":false,"width":2560,"height":1440,"refreshRate":144,"currentFormat":"XRGB8888","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":"none"}
+]
+JSON
+}
+
+write_mirror_state() {
+  cat >"$monitors_file" <<'JSON'
+[
+  {"id":0,"name":"DP-1","description":"Internal","disabled":false,"dpmsStatus":true,"focused":true,"width":1920,"height":1080,"refreshRate":60,"currentFormat":"XRGB8888","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":"none"},
+  {"id":1,"name":"DP-2","description":"External","disabled":false,"dpmsStatus":true,"focused":false,"width":1920,"height":1080,"refreshRate":60,"currentFormat":"XRGB8888","x":0,"y":0,"scale":1,"transform":0,"mirrorOf":0}
 ]
 JSON
 }
@@ -132,11 +161,14 @@ jq -e '.primary == "DP-2" and [.monitors[].name] == ["DP-2"] and .monitors[0].x 
 pass "monitor profile saves single-output layouts"
 
 profiles=$(run_profile list --json)
-jq -e '.active == "external" and [.profiles[].name] == ["desk", "external"]' <<<"$profiles" >/dev/null ||
+jq -e '.active == "" and [.profiles[].name] == ["desk", "external"]' <<<"$profiles" >/dev/null ||
   fail "monitor profile lists saved profiles and the active one" "$profiles"
+jq -e '.profiles[] | select(.name == "desk") | .primary == "DP-2" and (.details | contains("DP-2 2560x1440 @144Hz"))' <<<"$profiles" >/dev/null ||
+  fail "monitor profile lists layout details" "$profiles"
 pass "monitor profile lists saved profiles"
 
 printf '%s\n' '{"version":1,"name":"broken"}' >"$home_dir/.config/omarchy/monitor-profiles/broken.json"
+mkdir -p "$home_dir/.local/state/omarchy"
 printf '%s\n' broken >"$home_dir/.local/state/omarchy/monitor-profile"
 [[ -z $(run_profile current) ]] || fail "monitor profile accepts corrupt active state"
 profiles=$(run_profile list --json)
@@ -147,9 +179,9 @@ pass "monitor profile ignores corrupt saved state"
 write_internal_state
 : >"$hyprctl_log"
 run_profile apply desk
-grep -F 'output = "DP-1", mode = "1920x1080@60.00Hz", position = "5504x0"' "$hyprctl_log" >/dev/null ||
+grep -F 'output = "DP-1", mode = "1920x1080@60", position = "5504x0"' "$hyprctl_log" >/dev/null ||
   fail "monitor profile stages the first target outside the current and desired layouts"
-grep -F 'output = "DP-2", mode = "2560x1440@144.00Hz", position = "8448x0"' "$hyprctl_log" >/dev/null ||
+grep -F 'output = "DP-2", mode = "2560x1440@144", position = "8448x0"' "$hyprctl_log" >/dev/null ||
   fail "monitor profile stages later targets after earlier ones"
 pass "monitor profile stages multiple targets without overlap"
 
@@ -171,9 +203,9 @@ write_internal_state
 : >"$hyprctl_log"
 run_profile apply external
 
-stage_line=$(grep -nF 'output = "DP-2", mode = "2560x1440@144.00Hz", position = "3584x0"' "$hyprctl_log" | cut -d: -f1)
+stage_line=$(grep -nF 'output = "DP-2", mode = "2560x1440@144", position = "3584x0"' "$hyprctl_log" | cut -d: -f1)
 disable_line=$(grep -nF 'output = "DP-1", disabled = true' "$hyprctl_log" | cut -d: -f1)
-final_line=$(grep -nF 'output = "DP-2", mode = "2560x1440@144.00Hz", position = "0x0"' "$hyprctl_log" | cut -d: -f1 | tail -n 1)
+final_line=$(grep -nF 'output = "DP-2", mode = "2560x1440@144", position = "0x0"' "$hyprctl_log" | cut -d: -f1 | tail -n 1)
 [[ -n $stage_line && -n $disable_line && -n $final_line ]] ||
   fail "monitor profile emits the complete transactional switch" "$(<"$hyprctl_log")"
 (( stage_line < disable_line && disable_line < final_line )) ||
@@ -209,6 +241,15 @@ pass "monitor profile recovers a usable output when the selected display disconn
 run_profile deactivate
 [[ -z $(run_profile current) ]] || fail "monitor profile deactivates reconnect recovery"
 pass "monitor profile can be deactivated"
+
+write_mirror_state
+run_profile save mirrored
+jq -e '.monitors[] | select(.name == "DP-2" and .mirror == "DP-1")' \
+  "$home_dir/.config/omarchy/monitor-profiles/mirrored.json" >/dev/null ||
+  fail "monitor profile maps mirrored monitor ids to output names"
+run_profile apply mirrored
+[[ $(run_profile current) == "mirrored" ]] || fail "monitor profile applies mirrored layouts"
+pass "monitor profile saves and applies mirrored layouts"
 
 write_external_state
 jq '[.[] | select(.name == "DP-2")]' "$monitors_file" >"$monitors_file.tmp"

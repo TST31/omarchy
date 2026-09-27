@@ -37,7 +37,9 @@ grep -F 'done < <(socat' "$monitor_watch" >/dev/null
 pass "clamshell poll only runs on a docked laptop, not desktops or undocked laptops"
 
 grep -F 'omarchy-monitor-profile restore' "$monitor_watch" >/dev/null
-grep -F '[[ -n $(omarchy-monitor-profile current 2>/dev/null) ]] && return 0' "$monitor_watch" >/dev/null
+grep -F 'PROFILE_RETRY_LOCK' "$monitor_watch" >/dev/null
+grep -F 'omarchy-monitor-profile current' "$clamshell" >/dev/null
+grep -F 'rm -f "$CLAMSHELL_FLAG"' "$clamshell" >/dev/null
 pass "monitor watcher restores active profiles without fighting clamshell state"
 
 # Recovery costs a reload per attempt, so it must not run on a healthy machine,
